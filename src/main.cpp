@@ -4,6 +4,9 @@
 #include <WebServer.h>
 
 // ================== KONFIGURASI ==================
+// Saklar tes isolasi: nyalakan satu-satu untuk cari penyebab reset.
+#define ENABLE_WEB   1   // 0 = tanpa WiFi/web (tes brownout)
+#define ENABLE_DRIFT 1   // 0 = tanpa drift compensation
 #define LED_PIN 15                       // LED bawaan Lolin S2 Mini
 const char* AP_SSID = "ESP32-DAC";       // WiFi monitor (buka 192.168.4.1)
 const char* AP_PASS = "12345678";        // min. 8 karakter
@@ -80,7 +83,7 @@ void audioTask(void*) {
 
     // --- Drift compensation: samakan laju USB dengan clock I2S ---
     size_t w = n;
-    if (now - lastAdj >= 20) {
+    if (ENABLE_DRIFT && now - lastAdj >= 20) {
       if (av > HIGH_MARK && n >= 8) {          // buffer menumpuk -> buang 1 frame
         w = n - 4; S.drops++; lastAdj = now;
       } else if (av < LOW_MARK) {              // buffer menipis -> gandakan 1 frame
@@ -117,6 +120,7 @@ h1{font-size:18px;margin:0 0 10px}.g{display:grid;grid-template-columns:1fr 1fr;
 <div class="c"><span>Uptime</span><b id="up">0s</b></div>
 <div class="c"><span>Heap bebas</span><b id="hp">0 KB</b></div>
 <div class="c"><span>WiFi klien</span><b id="cl">0</b></div>
+<div class="c"><span>Reset reason (1=power,4=panic,7=wdt,15=brownout)</span><b id="rs">0</b></div>
 </div>
 <canvas id="c1" width="600" height="180"></canvas>
 <canvas id="c2" width="600" height="180"></canvas>
@@ -131,29 +135,38 @@ $('d').style.background=s.active?'#22c55e':'#888';$('st').textContent=s.active?'
 const lv=Math.round(s.level*100/s.cap);
 $('kb').textContent=kb.toFixed(0)+' KB/s';$('lv').textContent=lv+'%';$('un').textContent=s.under;
 $('gp').textContent=s.gap+' / '+s.maxgap+' ms';$('dr').textContent=s.drops+' / '+s.dups;
-$('up').textContent=Math.floor(s.up/60)+'m '+s.up%60+'s';$('hp').textContent=(s.heap/1024).toFixed(0)+' KB';$('cl').textContent=s.cl;
+$('up').textContent=Math.floor(s.up/60)+'m '+s.up%60+'s';$('hp').textContent=(s.heap/1024).toFixed(0)+' KB';$('cl').textContent=s.cl;$('rs').textContent=s.rst;
 H1.push(kb);H2.push(lv);if(H1.length>60){H1.shift();H2.shift()}
 draw('c1',H1,200,'#3b82f6');draw('c2',H2,100,'#f59e0b')}catch(e){$('st').textContent='Terputus'}}
 setInterval(tick,500);tick();
 </script></body></html>)HTML";
 
 void handleStats() {
-  char j[384];
+  char j[420];
   snprintf(j, sizeof(j),
     "{\"active\":%s,\"level\":%u,\"cap\":%u,\"bytes\":%llu,\"ms\":%lu,\"under\":%u,"
-    "\"gap\":%u,\"maxgap\":%u,\"drops\":%u,\"dups\":%u,\"up\":%lu,\"heap\":%u,\"cl\":%d}",
+    "\"gap\":%u,\"maxgap\":%u,\"drops\":%u,\"dups\":%u,\"up\":%lu,\"heap\":%u,\"cl\":%d,\"rst\":%d}",
     S.active ? "true" : "false", (unsigned)S.level, (unsigned)FIFO_BYTES,
     (unsigned long long)S.bytes, (unsigned long)millis(), (unsigned)S.underruns,
     (unsigned)S.lastGap, (unsigned)S.maxGap, (unsigned)S.drops, (unsigned)S.dups,
-    (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), WiFi.softAPgetStationNum());
+    (unsigned long)(millis() / 1000), (unsigned)ESP.getFreeHeap(), WiFi.softAPgetStationNum(), (int)esp_reset_reason());
   server.send(200, "application/json", j);
 }
 
 // ================== SETUP / LOOP ==================
 void setup() {
-  AudioLogger::instance().begin(Serial, AudioLogger::Warning);
+  // Tanpa Serial sama sekali. Alasan reset ditunjukkan lewat kedip LED:
+  // 1x = power on normal, 2x = crash/panic, 3x = brownout, 4x = watchdog, 5x = lainnya
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  esp_reset_reason_t r = esp_reset_reason();
+  int blinks = (r == ESP_RST_POWERON) ? 1 : (r == ESP_RST_PANIC) ? 2 :
+               (r == ESP_RST_BROWNOUT) ? 3 :
+               (r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT) ? 4 : 5;
+  for (int i = 0; i < blinks; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(250);
+    digitalWrite(LED_PIN, LOW);  delay(250);
+  }
+  delay(600);
 
   if (!TinyUSBDevice.isInitialized()) TinyUSBDevice.begin(0);
 
@@ -183,20 +196,23 @@ void setup() {
     TinyUSBDevice.attach();
   }
 
-  // WiFi AP + web (daya TX diturunkan supaya tidak mengganggu DAC analog)
+#if ENABLE_WEB
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS, 1, 0, 2);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   server.on("/", []() { server.send_P(200, "text/html", PAGE); });
   server.on("/stats", handleStats);
   server.begin();
+#endif
 
   // Task audio prioritas tinggi, terpisah dari loop() (web/LED)
-  xTaskCreate(audioTask, "audio", 4096, nullptr, 5, nullptr);
+  xTaskCreate(audioTask, "audio", 6144, nullptr, 3, nullptr);
 }
 
 void loop() {
+#if ENABLE_WEB
   server.handleClient();
+#endif
   digitalWrite(LED_PIN, S.active ? HIGH : LOW);
   delay(5);
 }
