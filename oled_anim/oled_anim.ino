@@ -1,11 +1,13 @@
-// ESP32-C3 + OLED SSD1306 128x64: animasi diupload lewat web
-// Library: Adafruit SSD1306, Adafruit GFX (WiFi, WebServer, LittleFS sudah bawaan core ESP32)
+// ESP32-C3 + OLED SSD1306 128x64: animasi diupload lewat web (versi lengkap)
+// Library: Adafruit SSD1306, Adafruit GFX, Adafruit BusIO
+// (WiFi, WebServer, LittleFS sudah bawaan core ESP32)
 //
 // Cara pakai:
-// 1. Upload sketch, sambungkan HP/laptop ke WiFi "OLED-Anim" (password 12345678)
+// 1. Sambungkan HP/laptop ke WiFi "OLED-Anim" (password 12345678)
 // 2. Buka http://192.168.4.1
 // 3. Pilih video (mp4/webm) atau beberapa gambar, atur FPS, klik "Konversi & Kirim"
-// Konversi ke 1-bit 128x64 dilakukan di browser, lalu disimpan di flash (tetap ada setelah restart).
+// Konversi ke 1-bit 128x64 dilakukan di browser, lalu disimpan di flash
+// (tetap ada setelah ESP32 dimatikan).
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -23,6 +25,7 @@
 
 const char* AP_SSID = "OLED-Anim";
 const char* AP_PASS = "12345678";
+const int AP_CHANNEL = 1;
 
 Adafruit_SSD1306 display(W, H, &Wire, -1);
 WebServer server(80);
@@ -33,6 +36,7 @@ uint8_t frameBuf[FRAME_BYTES];
 uint8_t fps = 10;
 uint32_t frameCount = 0, frameIdx = 0;
 unsigned long lastFrame = 0;
+String ipStr;
 
 const char PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -110,13 +114,14 @@ async function go(){
 </script></body></html>
 )rawliteral";
 
-void showText(const char* line1, const char* line2 = "") {
+void showText(const char* line1, const char* line2 = "", const char* line3 = "") {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.println(line1);
   display.println(line2);
+  display.println(line3);
   display.display();
 }
 
@@ -185,8 +190,17 @@ void setup() {
     while (true) delay(1000);
   }
 
-  WiFi.softAP(AP_SSID, AP_PASS);
-  String ip = WiFi.softAPIP().toString();
+  // WiFi Access Point (daya pancar diturunkan supaya stabil di board C3 kecil)
+  WiFi.mode(WIFI_AP);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  bool apOk = WiFi.softAP(AP_SSID, AP_PASS, AP_CHANNEL);
+  if (!apOk) {
+    showText("WiFi AP gagal");
+    Serial.println("softAP gagal");
+    while (true) delay(1000);
+  }
+  ipStr = WiFi.softAPIP().toString();
+  Serial.println("AP: " + String(AP_SSID) + "  IP: " + ipStr);
 
   server.on("/", HTTP_GET, []() { server.send_P(200, "text/html", PAGE); });
   server.on("/upload", HTTP_POST, handleDone, handleUpload);
@@ -194,7 +208,7 @@ void setup() {
 
   openAnim();
   if (frameCount == 0) {
-    showText("WiFi: OLED-Anim", ("Buka " + ip).c_str());
+    showText("WiFi: OLED-Anim", ("Buka " + ipStr).c_str());
   }
 }
 
