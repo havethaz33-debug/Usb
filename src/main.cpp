@@ -1,21 +1,11 @@
-// ESP32-S2 (LOLIN S2 mini): USB Audio -> I2S DAC + layar status OLED (U8g2, I2C).
-// Audio jalan di loop(). OLED digambar di task terpisah supaya I2C yang lambat tidak mengganggu audio.
-//
-// Pin:  I2S BCK=16 DATA=17 WS=18 | OLED SDA=33 SCL=35 (default S2 mini) | LED=15
-// OLED: SSD1306 128x64 I2C (alamat 0x3C). Kalau layarnya SH1106 (1.3"), ganti kelas "oled" di bawah.
-//
-// Layar menampilkan:
-//   baris 1: PLAY/IDLE + uptime (kalau uptime ke-reset = ada restart)
-//   baris 2: isi FIFO USB (garis = batas LOW 25% dan HIGH 70% untuk drift compensation)
-//   baris 3: drop/dup = berapa kali drift compensation membuang/menggandakan 1 frame
-//   baris 4: gap = FIFO kosong terlama (ms), heap = free heap terendah (KB; turun terus = memory leak)
-//   baris 5: penyebab restart terakhir, mis. "PANIC @write 45s" = crash saat nulis I2S, 45 dtk setelah mulai main
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
 #include "AudioTools.h"
 #include "AudioTools/Communication/USB/USBAudioStream.h"
 #include <esp_system.h>
+
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);   // stack loop() 16 KB (default 8 KB)
 
 #define LED_PIN  15
 #define OLED_SDA 33
@@ -40,22 +30,39 @@ U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 RTC_NOINIT_ATTR uint32_t rtcMagic;
 RTC_NOINIT_ATTR uint32_t rtcStage;
 RTC_NOINIT_ATTR uint32_t rtcPlaySecs;
-#define MAGIC 0xA5C3
+RTC_NOINIT_ATTR uint32_t rtcAv;
+RTC_NOINIT_ATTR uint32_t rtcN;
+RTC_NOINIT_ATTR uint32_t rtcStkL;
+RTC_NOINIT_ATTR uint32_t rtcStkU;
+#define MAGIC 0xA5C4
 #define STAGE(x) (rtcStage = (x))
 const char* const STAGE_NAME[] = {"-", "usb", "i2s", "att", "wait", "fifo", "read", "write", "empty"};
 
 // ---- Statistik untuk OLED (ditulis loop(), dibaca task OLED) ----
-volatile uint32_t gLevel = 0, gDrops = 0, gDups = 0, gGapMax = 0;
+volatile uint32_t gLevel = 0, gDrops = 0, gDups = 0, gGapMax = 0, gBadAv = 0;
 volatile bool gPlaying = false;
 char resetText[24] = "";
+char crashDetail[28] = "";
+TaskHandle_t loopHandle = nullptr;
+
+// Format byte -> "12.3" (KB, 1 desimal), "?" kalau tidak diketahui
+static void fmtKB(char* out, size_t sz, uint32_t bytes, bool known = true) {
+  if (!known) { snprintf(out, sz, "?"); return; }
+  snprintf(out, sz, "%lu.%lu", (unsigned long)(bytes / 1024), (unsigned long)((bytes % 1024) * 10 / 1024));
+}
 
 void readResetInfo() {
   esp_reset_reason_t r = esp_reset_reason();
+  crashDetail[0] = 0;
   if (r == ESP_RST_PANIC) {
     if (rtcMagic == MAGIC) {
       int st = (rtcStage <= 8) ? (int)rtcStage : 0;
       if (rtcPlaySecs > 0) snprintf(resetText, sizeof(resetText), "PANIC @%s %lus", STAGE_NAME[st], (unsigned long)(rtcPlaySecs - 1));
       else                 snprintf(resetText, sizeof(resetText), "PANIC @%s", STAGE_NAME[st]);
+      char l[8], u[8];
+      fmtKB(l, sizeof(l), rtcStkL);
+      fmtKB(u, sizeof(u), rtcStkU);
+      snprintf(crashDetail, sizeof(crashDetail), "a%lu n%lu L%s U%s", (unsigned long)rtcAv, (unsigned long)rtcN, l, u);
     } else {
       snprintf(resetText, sizeof(resetText), "PANIC (?)");
     }
@@ -69,11 +76,22 @@ void readResetInfo() {
     snprintf(resetText, sizeof(resetText), "RESET (%d)", (int)r);
   }
   rtcMagic = MAGIC;
-  rtcStage = 0;
-  rtcPlaySecs = 0;
+  rtcStage = 0; rtcPlaySecs = 0; rtcAv = 0; rtcN = 0; rtcStkL = 0; rtcStkU = 0;
 }
 
 void drawScreen() {
+  static TaskHandle_t usbHandle = nullptr;
+  if (!usbHandle) usbHandle = xTaskGetHandle("usbd");   // nama task USB di arduino-esp32
+
+  // Sisa stack terkecil (byte) kedua task; disimpan juga ke RTC supaya terbaca setelah crash
+  uint32_t stkL = loopHandle ? (uint32_t)uxTaskGetStackHighWaterMark(loopHandle) : 0;
+  uint32_t stkU = usbHandle  ? (uint32_t)uxTaskGetStackHighWaterMark(usbHandle)  : 0;
+  rtcStkL = stkL;
+  rtcStkU = stkU;
+  char sl[8], su[8];
+  fmtKB(sl, sizeof(sl), stkL, loopHandle != nullptr);
+  fmtKB(su, sizeof(su), stkU, usbHandle != nullptr);
+
   char line[32];
   int pct = (int)(((uint64_t)gLevel * 100) / FIFO_BYTES);
   if (pct > 100) pct = 100;
@@ -92,13 +110,17 @@ void drawScreen() {
   oled.drawVLine(30 + 96 * 70 / 100, 13, 11);        // HIGH
   oled.setDrawColor(1);
 
-  snprintf(line, sizeof(line), "drop %lu dup %lu", (unsigned long)gDrops, (unsigned long)gDups);
+  snprintf(line, sizeof(line), "gap %lums heap %uk", (unsigned long)gGapMax, (unsigned)(ESP.getMinFreeHeap() / 1024));
   oled.drawStr(0, 34, line);
 
-  snprintf(line, sizeof(line), "gap %lums heap %uk", (unsigned long)gGapMax, (unsigned)(ESP.getMinFreeHeap() / 1024));
-  oled.drawStr(0, 46, line);
+  oled.drawStr(0, 46, resetText);
 
-  oled.drawStr(0, 58, resetText);
+  if (crashDetail[0] && ((millis() / 3000) % 2 == 0)) {
+    oled.drawStr(0, 58, crashDetail);
+  } else {
+    snprintf(line, sizeof(line), "L%s U%s d%lu/%lu b%lu", sl, su, (unsigned long)gDrops, (unsigned long)gDups, (unsigned long)gBadAv);
+    oled.drawStr(0, 58, line);
+  }
   oled.sendBuffer();                                 // ~25 ms di I2C 400 kHz, aman karena di task sendiri
 }
 
@@ -111,12 +133,13 @@ void oledTask(void*) {
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
+  loopHandle = xTaskGetCurrentTaskHandle();
   readResetInfo();
 
   Wire.begin(OLED_SDA, OLED_SCL);
   oled.setBusClock(400000);
   oled.begin();
-  xTaskCreate(oledTask, "oled", 4096, nullptr, 1, nullptr);
+  xTaskCreate(oledTask, "oled", 6144, nullptr, 1, nullptr);
 
   STAGE(1);
   if (!TinyUSBDevice.isInitialized()) TinyUSBDevice.begin(0);
@@ -141,7 +164,7 @@ void setup() {
 }
 
 void loop() {
-  static uint8_t buf[CHUNK + 4];
+  static uint8_t buf[CHUNK + 4] __attribute__((aligned(4)));
   static bool playing = false;
   static uint32_t emptySince = 0, lastAdj = 0, playStart = 0;
 
@@ -150,10 +173,21 @@ void loop() {
   uint32_t now = millis();
   gLevel = av;
 
+  // available() ngawur (jauh di atas ukuran FIFO) -> jangan dibaca
+  if (av > 2 * FIFO_BYTES) { gBadAv = gBadAv + 1; delay(1); return; }
+
   // Isi FIFO dulu sebelum mulai main, supaya tahan jitter
   if (!playing) {
     if (av >= PREFILL) { playing = true; gPlaying = true; emptySince = 0; playStart = now; }
-    else { STAGE(4); rtcPlaySecs = 0; digitalWrite(LED_PIN, LOW); delay(1); return; }
+    else { 
+      STAGE(4); 
+      rtcPlaySecs = 0; 
+      digitalWrite(LED_PIN, LOW); 
+      // Kirim silence singkat saat memuat buffer agar I2S DMA tidak underflow
+      memset(buf, 0, 64);
+      i2sOut.write(buf, 64);
+      return; 
+    }
   }
   rtcPlaySecs = 1 + (now - playStart) / 1000;
 
@@ -162,7 +196,11 @@ void loop() {
     STAGE(8);
     if (!emptySince) emptySince = now;
     if (now - emptySince > AUDIO_TIMEOUT_MS) { playing = false; gPlaying = false; rtcPlaySecs = 0; }
-    delay(1);
+    
+    // UBAH: Tulis silence (0) ke I2S secara blocking.
+    // Ini menjaga hardware DMA I2S tetap berjalan mulus dan melepaskan siklus CPU untuk TinyUSB.
+    memset(buf, 0, CHUNK);
+    i2sOut.write(buf, CHUNK);
     return;
   }
   if (emptySince) {
@@ -172,11 +210,21 @@ void loop() {
   }
 
   size_t n = (av < CHUNK ? av : CHUNK) & ~3u;   // jaga alignment frame stereo 16-bit
-  if (n < 4) { delay(1); return; }
+  if (n < 4) { 
+    memset(buf, 0, 4);
+    i2sOut.write(buf, 4);
+    return; 
+  }
 
   STAGE(6);
+  rtcAv = av;                                   // dicatat sebelum baca: kalau crash, nilai ini yang tampil
+  rtcN = n;
   n = usbIn.readBytes(buf, n) & ~3u;
-  if (n < 4) { delay(1); return; }              // setiap jalur harus yield
+  if (n < 4) { 
+    memset(buf, 0, 4);
+    i2sOut.write(buf, 4);
+    return; 
+  }
 
   // Drift compensation: samakan laju USB dengan clock I2S
   size_t w = n;
