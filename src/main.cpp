@@ -5,7 +5,7 @@
 #include "AudioTools/Communication/USB/USBAudioStream.h"
 #include <esp_system.h>
 
-SET_LOOP_TASK_STACK_SIZE(16 * 1024);   // stack loop() 16 KB (default 8 KB)
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);   // stack loop() 16 KB
 
 #define LED_PIN  15
 #define OLED_SDA 33
@@ -24,9 +24,8 @@ USBAudioStream usbIn;
 I2SStream i2sOut;
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
-// U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);   // <- untuk layar SH1106
 
-// ---- Catatan crash di RTC memory (bertahan setelah panic-reboot) ----
+// ---- Catatan crash di RTC memory ----
 RTC_NOINIT_ATTR uint32_t rtcMagic;
 RTC_NOINIT_ATTR uint32_t rtcStage;
 RTC_NOINIT_ATTR uint32_t rtcPlaySecs;
@@ -38,14 +37,13 @@ RTC_NOINIT_ATTR uint32_t rtcStkU;
 #define STAGE(x) (rtcStage = (x))
 const char* const STAGE_NAME[] = {"-", "usb", "i2s", "att", "wait", "fifo", "read", "write", "empty"};
 
-// ---- Statistik untuk OLED (ditulis loop(), dibaca task OLED) ----
+// ---- Statistik untuk OLED ----
 volatile uint32_t gLevel = 0, gDrops = 0, gDups = 0, gGapMax = 0, gBadAv = 0;
 volatile bool gPlaying = false;
 char resetText[24] = "";
 char crashDetail[28] = "";
 TaskHandle_t loopHandle = nullptr;
 
-// Format byte -> "12.3" (KB, 1 desimal), "?" kalau tidak diketahui
 static void fmtKB(char* out, size_t sz, uint32_t bytes, bool known = true) {
   if (!known) { snprintf(out, sz, "?"); return; }
   snprintf(out, sz, "%lu.%lu", (unsigned long)(bytes / 1024), (unsigned long)((bytes % 1024) * 10 / 1024));
@@ -61,7 +59,7 @@ void readResetInfo() {
       else                 snprintf(resetText, sizeof(resetText), "PANIC @%s", STAGE_NAME[st]);
       char l[8], u[8];
       fmtKB(l, sizeof(l), rtcStkL);
-      fmtKB(u, sizeof(u), rtcStkU);
+      fmtKB(u, sizeof(u), rtcStkU, rtcStkU != 0);
       snprintf(crashDetail, sizeof(crashDetail), "a%lu n%lu L%s U%s", (unsigned long)rtcAv, (unsigned long)rtcN, l, u);
     } else {
       snprintf(resetText, sizeof(resetText), "PANIC (?)");
@@ -80,17 +78,13 @@ void readResetInfo() {
 }
 
 void drawScreen() {
-  static TaskHandle_t usbHandle = nullptr;
-  if (!usbHandle) usbHandle = xTaskGetHandle("usbd");   // nama task USB di arduino-esp32
-
-  // Sisa stack terkecil (byte) kedua task; disimpan juga ke RTC supaya terbaca setelah crash
   uint32_t stkL = loopHandle ? (uint32_t)uxTaskGetStackHighWaterMark(loopHandle) : 0;
-  uint32_t stkU = usbHandle  ? (uint32_t)uxTaskGetStackHighWaterMark(usbHandle)  : 0;
   rtcStkL = stkL;
-  rtcStkU = stkU;
+  rtcStkU = 0; // Matikan pembacaan stack usbd langsung demi stabilitas interrupt
+
   char sl[8], su[8];
   fmtKB(sl, sizeof(sl), stkL, loopHandle != nullptr);
-  fmtKB(su, sizeof(su), stkU, usbHandle != nullptr);
+  fmtKB(su, sizeof(su), 0, false);
 
   char line[32];
   int pct = (int)(((uint64_t)gLevel * 100) / FIFO_BYTES);
@@ -105,9 +99,9 @@ void drawScreen() {
   oled.drawStr(0, 22, "FIFO");
   oled.drawFrame(28, 14, 100, 9);
   oled.drawBox(30, 16, pct * 96 / 100, 5);
-  oled.setDrawColor(2);                              // XOR supaya penanda terlihat di atas isi bar
-  oled.drawVLine(30 + 96 * 25 / 100, 13, 11);        // LOW
-  oled.drawVLine(30 + 96 * 70 / 100, 13, 11);        // HIGH
+  oled.setDrawColor(2);                              
+  oled.drawVLine(30 + 96 * 25 / 100, 13, 11);        
+  oled.drawVLine(30 + 96 * 70 / 100, 13, 11);        
   oled.setDrawColor(1);
 
   snprintf(line, sizeof(line), "gap %lums heap %uk", (unsigned long)gGapMax, (unsigned)(ESP.getMinFreeHeap() / 1024));
@@ -121,7 +115,7 @@ void drawScreen() {
     snprintf(line, sizeof(line), "L%s U%s d%lu/%lu b%lu", sl, su, (unsigned long)gDrops, (unsigned long)gDups, (unsigned long)gBadAv);
     oled.drawStr(0, 58, line);
   }
-  oled.sendBuffer();                                 // ~25 ms di I2C 400 kHz, aman karena di task sendiri
+  oled.sendBuffer();                                 
 }
 
 void oledTask(void*) {
@@ -139,7 +133,7 @@ void setup() {
   Wire.begin(OLED_SDA, OLED_SCL);
   oled.setBusClock(400000);
   oled.begin();
-  xTaskCreate(oledTask, "oled", 6144, nullptr, 1, nullptr);
+  xTaskCreate(oledTask, "oled", 4096, nullptr, 1, nullptr);
 
   STAGE(1);
   if (!TinyUSBDevice.isInitialized()) TinyUSBDevice.begin(0);
@@ -156,7 +150,8 @@ void setup() {
   auto i2s_cfg = i2sOut.defaultConfig(TX_MODE);
   i2s_cfg.copyFrom(info);
   i2s_cfg.pin_bck = 16; i2s_cfg.pin_data = 17; i2s_cfg.pin_ws = 18;
-  i2s_cfg.buffer_count = 8; i2s_cfg.buffer_size = 1024;
+  i2s_cfg.buffer_count = 6; 
+  i2s_cfg.buffer_size = 512; // Disamakan dengan CHUNK (512) agar DMA seragam
   i2sOut.begin(i2s_cfg);
 
   STAGE(3);
@@ -164,7 +159,8 @@ void setup() {
 }
 
 void loop() {
-  static uint8_t buf[CHUNK + 4] __attribute__((aligned(4)));
+  // Tambah alokasi buffer aman (+64 byte) untuk mencegah overflow saat duplicating frame
+  static uint8_t buf[CHUNK + 64] __attribute__((aligned(4)));
   static bool playing = false;
   static uint32_t emptySince = 0, lastAdj = 0, playStart = 0;
 
@@ -173,43 +169,51 @@ void loop() {
   uint32_t now = millis();
   gLevel = av;
 
-  // available() ngawur (jauh di atas ukuran FIFO) -> jangan dibaca
   if (av > 2 * FIFO_BYTES) { gBadAv = gBadAv + 1; delay(1); return; }
 
-  // Isi FIFO dulu sebelum mulai main, supaya tahan jitter
+  // Prefill buffer sebelum mulai
   if (!playing) {
     if (av >= PREFILL) { playing = true; gPlaying = true; emptySince = 0; playStart = now; }
     else { 
       STAGE(4); 
       rtcPlaySecs = 0; 
       digitalWrite(LED_PIN, LOW); 
-      // Kirim silence singkat saat memuat buffer agar I2S DMA tidak underflow
-      memset(buf, 0, 64);
-      i2sOut.write(buf, 64);
+      memset(buf, 0, 128);
+      i2sOut.write(buf, 128);
       return; 
     }
   }
   rtcPlaySecs = 1 + (now - playStart) / 1000;
 
-  // FIFO kosong: kalau lebih dari AUDIO_TIMEOUT_MS anggap stream berhenti, isi ulang dulu
+  // Bebani I2S dengan data hening jika stream kosong
   if (av == 0) {
     STAGE(8);
     if (!emptySince) emptySince = now;
     if (now - emptySince > AUDIO_TIMEOUT_MS) { playing = false; gPlaying = false; rtcPlaySecs = 0; }
     
-    // UBAH: Tulis silence (0) ke I2S secara blocking.
-    // Ini menjaga hardware DMA I2S tetap berjalan mulus dan melepaskan siklus CPU untuk TinyUSB.
     memset(buf, 0, CHUNK);
     i2sOut.write(buf, CHUNK);
     return;
   }
+
   if (emptySince) {
     uint32_t gap = now - emptySince;
     if (gap > gGapMax) gGapMax = gap;
     emptySince = 0;
   }
 
-  size_t n = (av < CHUNK ? av : CHUNK) & ~3u;   // jaga alignment frame stereo 16-bit
+  // Drift compensation: Buang sampel langsung dari USB FIFO (bukan memotong panjang `w`)
+  if (now - lastAdj >= 20) {
+    if (av > HIGH_MARK) {
+      uint8_t discardBuf[4];
+      usbIn.readBytes(discardBuf, 4); // Buang 1 frame stereo langsung dari USB ringbuffer
+      av -= 4;
+      lastAdj = now;
+      gDrops++;
+    }
+  }
+
+  size_t n = (av < CHUNK ? av : CHUNK) & ~3u;
   if (n < 4) { 
     memset(buf, 0, 4);
     i2sOut.write(buf, 4);
@@ -217,7 +221,7 @@ void loop() {
   }
 
   STAGE(6);
-  rtcAv = av;                                   // dicatat sebelum baca: kalau crash, nilai ini yang tampil
+  rtcAv = av;
   rtcN = n;
   n = usbIn.readBytes(buf, n) & ~3u;
   if (n < 4) { 
@@ -226,18 +230,16 @@ void loop() {
     return; 
   }
 
-  // Drift compensation: samakan laju USB dengan clock I2S
   size_t w = n;
-  if (now - lastAdj >= 20) {
-    if (av > HIGH_MARK && n >= 8) {             // FIFO menumpuk -> buang 1 frame
-      w = n - 4; lastAdj = now; gDrops = gDrops + 1;
-    } else if (av < LOW_MARK) {                 // FIFO menipis -> gandakan 1 frame
-      memcpy(buf + n, buf + n - 4, 4);
-      w = n + 4; lastAdj = now; gDups = gDups + 1;
-    }
+  // Penggandaan frame saat buffer menipis
+  if (now - lastAdj >= 20 && av < LOW_MARK && n >= 4) {
+    memcpy(buf + n, buf + n - 4, 4);
+    w = n + 4;
+    lastAdj = now;
+    gDups++;
   }
 
   STAGE(7);
-  i2sOut.write(buf, w);                         // blocking = dipacu clock I2S
+  i2sOut.write(buf, w);
   digitalWrite(LED_PIN, HIGH);
 }
