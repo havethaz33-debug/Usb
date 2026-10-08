@@ -1,29 +1,29 @@
-name: Build firmware
+name: Build ESP32-C3
+
 on:
   workflow_dispatch:
   push:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install platformio
-      - run: pio run
-      - name: Gabung jadi satu bin
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install core dan library
         run: |
-          pip install esptool
-          B=.pio/build/lolin_s2_mini
-          BOOT=$(find ~/.platformio -name boot_app0.bin | head -n 1)
-          python -m esptool --chip esp32s2 merge_bin -o $B/merged.bin \
-            --flash_mode dio --flash_size 4MB \
-            0x1000 $B/bootloader.bin \
-            0x8000 $B/partitions.bin \
-            0xe000 $BOOT \
-            0x10000 $B/firmware.bin
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "Adafruit SSD1306" "Adafruit GFX Library" "Adafruit BusIO"
+
+      - name: Compile
+        run: arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc --export-binaries oled_anim
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
-          path: .pio/build/lolin_s2_mini/merged.bin
+          path: oled_anim/build/**/*.bin
