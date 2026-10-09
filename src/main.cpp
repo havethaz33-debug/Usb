@@ -1,5 +1,6 @@
-#define USE_TINYUSB 1
+#include <Arduino.h>
 #include "AudioTools.h"
+#include "AudioTools/Communication/USB/USBAudioStream.h"
 
 #define LED_PIN 15
 #define TX_PIN  40  // Pin TX telemetri ke ESP32-C3
@@ -24,7 +25,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // Inisialisasi USB Input (Otomatis ditangani oleh usbIn.begin)
+  // Inisialisasi USB Input
   auto usb_cfg = usbIn.defaultConfig(RX_MODE);
   usb_cfg.copyFrom(info);
   usb_cfg.manufacturer  = "ESP32 Audio";
@@ -32,6 +33,7 @@ void setup() {
   usb_cfg.serial        = "000001";
   usb_cfg.volume_active = false;
   usb_cfg.fifo_packets  = 64;
+  usb_cfg.begin_usb     = true;  // wajib: di ESP32 defaultnya false, tanpa ini USB.begin() tidak dipanggil
   usbIn.begin(usb_cfg);
 
   // Konfigurasi I2S Output (PCM5102A)
@@ -90,11 +92,11 @@ void loop() {
     uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
     uint8_t statusVal = isPlaying ? 1 : 0;
 
-    Serial1.printf("DATA:%d,%d,%lu,%lu,%d\n", 
-                   statusVal, 
-                   info.sample_rate, 
-                   freeHeapKb, 
-                   underrunCount, 
-                   audioPeak);
+    Serial1.printf("DATA:%u,%lu,%lu,%lu,%u\n",
+                   (unsigned)statusVal,
+                   (unsigned long)info.sample_rate,
+                   (unsigned long)freeHeapKb,
+                   underrunCount,
+                   (unsigned)audioPeak);
   }
 }
