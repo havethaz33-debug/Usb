@@ -1,8 +1,7 @@
 #include "AudioTools.h"
-#include "AudioTools/Communication/USB/USBAudioStream.h"
 
 #define LED_PIN 15
-#define TX_PIN  40
+#define TX_PIN  40  // GPIO 40 untuk kirim data telemetri ke RX ESP32-C3
 
 AudioInfo info(44100, 2, 16);
 USBAudioStream usbIn;
@@ -19,6 +18,7 @@ bool isPlaying = false;
 uint8_t audioBuf[512];
 
 void setup() {
+  // Serial1 khusus kirim telemetri via GPIO 40
   Serial1.begin(115200, SERIAL_8N1, -1, TX_PIN);
 
   pinMode(LED_PIN, OUTPUT);
@@ -28,22 +28,24 @@ void setup() {
     TinyUSBDevice.begin(0);
   }
 
+  // --- Konfigurasi USB Input ---
   auto usb_cfg = usbIn.defaultConfig(RX_MODE);
   usb_cfg.copyFrom(info);
   usb_cfg.manufacturer  = "ESP32 Audio";
   usb_cfg.product       = "ESP32-S2 DAC";
   usb_cfg.serial        = "000001";
   usb_cfg.volume_active = false;
-  usb_cfg.fifo_packets  = 32; // Diturunkan ke 32 agar latensi FIFO kecil
+  usb_cfg.fifo_packets  = 32; // Buffer FIFO diperkecil agar latensi rendah
   usbIn.begin(usb_cfg);
 
+  // --- Konfigurasi I2S Output (PCM5102A) ---
   auto i2s_cfg = i2sOut.defaultConfig(TX_MODE);
   i2s_cfg.copyFrom(info);
   i2s_cfg.pin_bck     = 16;
   i2s_cfg.pin_data    = 17;
   i2s_cfg.pin_ws      = 18;
   i2s_cfg.buffer_count = 8;
-  i2s_cfg.buffer_size  = 256; // Buffer I2S diperkecil agar pengurasan lebih cepat
+  i2s_cfg.buffer_size  = 256;
   i2sOut.begin(i2s_cfg);
 
   if (TinyUSBDevice.mounted()) {
@@ -57,7 +59,7 @@ void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
-  // FIX BUFFER LAG: Jika buffer membludak > 2KB (saat ganti lagu), kuras data lama
+  // FIX LAG SAAT GANTI LAGU: Kuras penumpukan buffer jika > 2KB
   if (avail > 2048) {
     while (usbIn.available() > 512) {
       usbIn.readBytes(audioBuf, 512);
@@ -73,7 +75,7 @@ void loop() {
       lastAudioTime = now;
       isPlaying = true;
 
-      // Hitung peak sinyal
+      // Hitung peak sinyal audio
       int32_t maxVal = 0;
       int16_t *samples = (int16_t *)audioBuf;
       for (size_t i = 0; i < readBytes / 2; i += 8) {
@@ -92,7 +94,7 @@ void loop() {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  // Telemetri dikirim tiap 150ms (ringan & tidak membebani CPU S2)
+  // Kirim data telemetri tiap 150 ms
   if (now - lastTelemetryTime >= 150) {
     lastTelemetryTime = now;
     uint8_t statusVal = isPlaying ? 1 : 0;
