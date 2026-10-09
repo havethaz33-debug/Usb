@@ -1,7 +1,8 @@
+#define USE_TINYUSB 1
 #include "AudioTools.h"
 
 #define LED_PIN 15
-#define TX_PIN  40  // GPIO 40 untuk kirim data telemetri ke RX ESP32-C3
+#define TX_PIN  40  // GPIO 40 kirim data telemetri ke ESP32-C3
 
 AudioInfo info(44100, 2, 16);
 USBAudioStream usbIn;
@@ -35,7 +36,7 @@ void setup() {
   usb_cfg.product       = "ESP32-S2 DAC";
   usb_cfg.serial        = "000001";
   usb_cfg.volume_active = false;
-  usb_cfg.fifo_packets  = 32; // Buffer FIFO diperkecil agar latensi rendah
+  usb_cfg.fifo_packets  = 32;
   usbIn.begin(usb_cfg);
 
   // --- Konfigurasi I2S Output (PCM5102A) ---
@@ -59,7 +60,7 @@ void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
-  // FIX LAG SAAT GANTI LAGU: Kuras penumpukan buffer jika > 2KB
+  // Kuras buffer jika menumpuk > 2KB (mencegah lag ganti lagu)
   if (avail > 2048) {
     while (usbIn.available() > 512) {
       usbIn.readBytes(audioBuf, 512);
@@ -75,7 +76,7 @@ void loop() {
       lastAudioTime = now;
       isPlaying = true;
 
-      // Hitung peak sinyal audio
+      // Hitung peak level audio
       int32_t maxVal = 0;
       int16_t *samples = (int16_t *)audioBuf;
       for (size_t i = 0; i < readBytes / 2; i += 8) {
