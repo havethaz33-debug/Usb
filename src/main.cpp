@@ -1,6 +1,6 @@
-#define USE_TINYUSB 1
-#include "USB.h"
+
 #include "AudioTools.h"
+#include "AudioTools/Communication/USB/USBAudioStream.h"
 
 #define LED_PIN 15
 #define TX_PIN  40  // Pin TX telemetri ke ESP32-C3
@@ -21,7 +21,6 @@ bool isPlaying = false;
 uint8_t audioBuf[512];
 
 void setup() {
-  // Gunakan Serial1 khusus untuk kirim data telemetri via GPIO 40
   Serial1.begin(115200, SERIAL_8N1, -1, TX_PIN);
 
   pinMode(LED_PIN, OUTPUT);
@@ -60,6 +59,14 @@ void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
+  // Kuras penumpukan buffer saat ganti lagu agar tidak lag
+  if (avail > 2048) {
+    while (usbIn.available() > 512) {
+      usbIn.readBytes(audioBuf, 512);
+    }
+    avail = usbIn.available();
+  }
+
   if (avail >= 512) {
     size_t readBytes = usbIn.readBytes(audioBuf, 512);
     if (readBytes > 0) {
@@ -68,7 +75,7 @@ void loop() {
       lastAudioTime = now;
       isPlaying = true;
 
-      // Hitung amplitudo sinyal audio buat VU Meter
+      // Hitung amplitudo sinyal audio buat VU/Equalizer
       int32_t maxVal = 0;
       int16_t *samples = (int16_t *)audioBuf;
       for (size_t i = 0; i < readBytes / 2; i += 8) {
@@ -87,8 +94,8 @@ void loop() {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  // Kirim string telemetri lewat Serial1 (GPIO 40) tiap 300ms
-  if (now - lastTelemetryTime >= 300) {
+  // Kirim telemetri 5 variabel ke ESP32-C3 tiap 150ms
+  if (now - lastTelemetryTime >= 150) {
     lastTelemetryTime = now;
 
     uint32_t freeHeapKb = ESP.getFreeHeap() / 1024;
