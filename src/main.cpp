@@ -2,7 +2,7 @@
 #include "AudioTools.h"
 
 #define LED_PIN 15
-#define TX_PIN  40  // GPIO 40 kirim data telemetri ke ESP32-C3
+#define TX_PIN  40
 
 AudioInfo info(44100, 2, 16);
 USBAudioStream usbIn;
@@ -19,7 +19,6 @@ bool isPlaying = false;
 uint8_t audioBuf[512];
 
 void setup() {
-  // Serial1 khusus kirim telemetri via GPIO 40
   Serial1.begin(115200, SERIAL_8N1, -1, TX_PIN);
 
   pinMode(LED_PIN, OUTPUT);
@@ -29,7 +28,6 @@ void setup() {
     TinyUSBDevice.begin(0);
   }
 
-  // --- Konfigurasi USB Input ---
   auto usb_cfg = usbIn.defaultConfig(RX_MODE);
   usb_cfg.copyFrom(info);
   usb_cfg.manufacturer  = "ESP32 Audio";
@@ -39,7 +37,6 @@ void setup() {
   usb_cfg.fifo_packets  = 32;
   usbIn.begin(usb_cfg);
 
-  // --- Konfigurasi I2S Output (PCM5102A) ---
   auto i2s_cfg = i2sOut.defaultConfig(TX_MODE);
   i2s_cfg.copyFrom(info);
   i2s_cfg.pin_bck     = 16;
@@ -60,7 +57,6 @@ void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
-  // Kuras buffer jika menumpuk > 2KB (mencegah lag ganti lagu)
   if (avail > 2048) {
     while (usbIn.available() > 512) {
       usbIn.readBytes(audioBuf, 512);
@@ -76,7 +72,6 @@ void loop() {
       lastAudioTime = now;
       isPlaying = true;
 
-      // Hitung peak level audio
       int32_t maxVal = 0;
       int16_t *samples = (int16_t *)audioBuf;
       for (size_t i = 0; i < readBytes / 2; i += 8) {
@@ -95,7 +90,6 @@ void loop() {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 
-  // Kirim data telemetri tiap 150 ms
   if (now - lastTelemetryTime >= 150) {
     lastTelemetryTime = now;
     uint8_t statusVal = isPlaying ? 1 : 0;
