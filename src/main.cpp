@@ -8,7 +8,6 @@
 AudioInfo info(44100, 2, 16);
 USBAudioStream usbIn;
 I2SStream i2sOut;
-StreamCopy copier(i2sOut, usbIn, 512);
 
 unsigned long lastAudioTime = 0;
 unsigned long lastTelemetryTime = 0;
@@ -21,7 +20,6 @@ bool isPlaying = false;
 uint8_t audioBuf[512];
 
 void setup() {
-  // Serial1 khusus kirim telemetri via GPIO 40
   Serial1.begin(115200, SERIAL_8N1, -1, TX_PIN);
 
   pinMode(LED_PIN, OUTPUT);
@@ -60,7 +58,7 @@ void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
-  // FIX BUFFER LAG: Kuras penumpukan buffer saat ganti lagu (lagu ke-2 / ke-3)
+  // Kuras penumpukan buffer saat ganti lagu
   if (avail > 2048) {
     while (usbIn.available() > 512) {
       usbIn.readBytes(audioBuf, 512);
@@ -76,7 +74,6 @@ void loop() {
       lastAudioTime = now;
       isPlaying = true;
 
-      // Hitung amplitudo sinyal audio buat VU / Equalizer
       int32_t maxVal = 0;
       int16_t *samples = (int16_t *)audioBuf;
       for (size_t i = 0; i < readBytes / 2; i += 8) {
