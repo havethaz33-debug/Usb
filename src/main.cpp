@@ -1,5 +1,4 @@
 #define USE_TINYUSB 1
-#include "USB.h"
 #include "AudioTools.h"
 
 #define LED_PIN 15
@@ -25,10 +24,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  if (!TinyUSBDevice.isInitialized()) {
-    TinyUSBDevice.begin(0);
-  }
-
+  // Inisialisasi USB Input (Otomatis ditangani oleh usbIn.begin)
   auto usb_cfg = usbIn.defaultConfig(RX_MODE);
   usb_cfg.copyFrom(info);
   usb_cfg.manufacturer  = "ESP32 Audio";
@@ -38,6 +34,7 @@ void setup() {
   usb_cfg.fifo_packets  = 64;
   usbIn.begin(usb_cfg);
 
+  // Konfigurasi I2S Output (PCM5102A)
   auto i2s_cfg = i2sOut.defaultConfig(TX_MODE);
   i2s_cfg.copyFrom(info);
   i2s_cfg.pin_bck     = 16;
@@ -46,19 +43,13 @@ void setup() {
   i2s_cfg.buffer_count = 6;
   i2s_cfg.buffer_size  = 512;
   i2sOut.begin(i2s_cfg);
-
-  if (TinyUSBDevice.mounted()) {
-    TinyUSBDevice.detach();
-    delay(10);
-    TinyUSBDevice.attach();
-  }
 }
 
 void loop() {
   size_t avail = usbIn.available();
   unsigned long now = millis();
 
-  // Kuras penumpukan buffer saat ganti lagu
+  // Kuras penumpukan buffer jika > 2KB (mencegah lag ganti lagu)
   if (avail > 2048) {
     while (usbIn.available() > 512) {
       usbIn.readBytes(audioBuf, 512);
